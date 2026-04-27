@@ -1,0 +1,32 @@
+<?xml version="1.0" ?>
+<mujoco model="UR5e">
+  <compiler angle="radian" balanceinertia="true"/>
+  <option gravity="0 0 0" noslip_iterations="5" noslip_tolerance="1e-8" integrator="implicitfast" impratio="10"> </option>
+  <visual>
+    <global offwidth="640" offheight="480"/>
+    <quality shadowsize="4096"/>
+  </visual>
+  <default>
+    <default class="robot">
+      <default class="visual">
+        <geom contype="0" conaffinity="0" group="2"/>
+      </default>
+      <default class="collision">
+        <geom contype="1" conaffinity="1" group="3" condim="4"/>
+      </default>
+    </default>
+  </default>
+  <asset>
+    <mesh name="MESH_peg_base" file="../meshes/peg_base.STL"/>
+    <mesh name="MESH_main_body_peg_f2370d47" file="../meshes/main_body_peg_f2370d47.STL"/>
+  </asset>
+  <worldbody>
+    <body name="peg" pos="0 0 0" quat="1.0 0.0 0.0 0.0">
+      <site name="_peg" pos="0 0 0" quat="0 1 0 0"/>
+      <geom class="visual" name="VISUAL_peg_base" type="mesh" mesh="MESH_peg_base" pos="0 0 0" quat="0.70711 0.70711 0.0 0.0"/>
+      <geom class="visual" name="VISUAL_main_body_peg_f2370d47" type="mesh" mesh="MESH_main_body_peg_f2370d47" pos="0 0 0" quat="0.0 1.0 0.0 0.0"/>
+      <geom class="collision" name="COLISIONS_peg_base" type="mesh" mesh="MESH_peg_base" pos="0 0 0" quat="0.70711 0.70711 0.0 0.0"/>
+      <geom class="collision" name="COLISIONS_main_body_peg_f2370d47" type="mesh" mesh="MESH_main_body_peg_f2370d47" pos="0 0 0" quat="0.0 1.0 0.0 0.0"/>
+    </body>
+  </worldbody>
+</mujoco>
