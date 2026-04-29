@@ -266,15 +266,24 @@
                                     <site name="_tcp" pos="0 0 0" quat="1 0 0 0"/>
                                     <body name="lens_link" pos="0.0 0.0 0.0" quat="1.0 0.0 0.0 0.0">
                                       <inertial mass="0.0438" diaginertia="0.0003246 0.0006287 0.0003223" pos="0 0 0.205" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_0" type="mesh" mesh="MESH_lens_0_95837269" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_1" type="mesh" mesh="MESH_lens_1_0ea760e3" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_2" type="mesh" mesh="MESH_lens_2_17e9b118" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_3" type="mesh" mesh="MESH_lens_3_374e2d52" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_4" type="mesh" mesh="MESH_lens_4_f4180c93" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_5" type="mesh" mesh="MESH_lens_5_7c8fdeea" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_6" type="mesh" mesh="MESH_lens_6_d1d8923f" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_7" type="mesh" mesh="MESH_lens_7_fc00ca60" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
-                                      <geom class="collision" name="COLLISION_lens_link_8" type="mesh" mesh="MESH_lens_8_7af0c489" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_0" type="mesh" mesh="MESH_lens_0_95837269" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_1" type="mesh" mesh="MESH_lens_1_0ea760e3" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_2" type="mesh" mesh="MESH_lens_2_17e9b118" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_3" type="mesh" mesh="MESH_lens_3_374e2d52" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_4" type="mesh" mesh="MESH_lens_4_f4180c93" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_5" type="mesh" mesh="MESH_lens_5_7c8fdeea" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_6" type="mesh" mesh="MESH_lens_6_d1d8923f" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_7" type="mesh" mesh="MESH_lens_7_fc00ca60" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
+                                      <geom class="collision" name="COLLISION_lens_link_8" type="mesh" mesh="MESH_lens_8_7af0c489" pos="0 0 0" quat="1.0 0.0 0.0 0.0"
+                                        condim="3" friction="0.05 0.001 0.0001" solref="0.003 1" solimp="0.98 0.995 0.0005 0.5 2" margin="0"/>
                                       <geom class="visual" name="VISUAL_lens_link_0" type="mesh" mesh="MESH_lens_f8a76047" rgba="0.7 0.7 0.7 1.0" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
                                       <site name="_hole" pos="0 0 0.35" quat="1 0 0 0"/>
                                     </body>
