@@ -133,7 +133,7 @@
       <geom class="visual" name="cube_B_link_TEXTURE" type="box" material="cube_B_link_TEXTURE" pos="0.0 0.0 0.025" euler="0.0 0.0 0.0" size="0.025 0.025 1e-5"/>
       <freejoint/>
     </body> -->
-    <body name="ur_base_link" pos="0 0 0.5" quat="1.0 0.0 0.0 0.0">
+    <body name="ur_base_link" pos="0 0 0.5" quat="0.0 0.0 0.0 1.0">
       <body name="ur_base_link_inertia" pos="0 0 0" quat="6.123233995736766e-17 0.0 0.0 1.0">
         <inertial mass="4.0" diaginertia="0.00443333156 0.00443333156 0.0072" pos="0 0 0" quat="1.0 0.0 0.0 0.0"/>
         <geom class="collision" name="COLLISION_ur_base_link_inertia_0" type="mesh" mesh="MESH_base_bd1b2dd6" pos="0 0 0" quat="6.123233995736766e-17 0.0 0.0 1.0"/>

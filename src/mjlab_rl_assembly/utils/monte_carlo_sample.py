@@ -1162,7 +1162,7 @@ def main() -> None:
         robot_xml="./src/mjlab_rl_assembly/mjcf/UR5e.xml",
         peg_xml="./src/mjlab_rl_assembly/mjcf/peg.xml",
 
-        out_path="./src/utils/feasible_reset_dataset.npz",
+        out_path="./src/mjlab_rl_assembly/utils/reset_dataset.npz",
 
         # ===============================
         # site 名称
@@ -1176,7 +1176,7 @@ def main() -> None:
         # 这里要改成实际前缀。
         # ===============================
         robot_prefix="ur_",
-        robot_geom_prefix="COLLISION_ur_",
+        robot_geom_prefix="COLLISION_",
 
         # 如果机械臂基座 body 不是世界原点，可以填实际 body 名称
         robot_base_body="ur_base_link",
@@ -1194,7 +1194,7 @@ def main() -> None:
         seed=0,
 
         # 初始 UR_EE_SITE 与 PEG_SITE 沿 PEG_SITE 局部 z 轴相距 10 cm
-        ee_offset_z=0.10,
+        ee_offset_z=-0.10,
 
         # peg 姿态采样
         # "uniform_quat" 或 "euler_range"
@@ -1235,7 +1235,7 @@ def main() -> None:
         # ===============================
         # 可视化调试
         # ===============================
-        visualize=True,
+        visualize=False,
         viz_max_samples=20,
         viz_switch_interval=2.0,
 

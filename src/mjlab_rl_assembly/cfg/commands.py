@@ -9,7 +9,13 @@ from mjlab.managers.command_manager import CommandTermCfg, CommandTerm
 from mjlab.utils.lab_api.math import sample_uniform
 
 
-from mjlab_rl_assembly.cfg.constants import EE_SITE_NAME, PEG_SITE_NAME, UR5E_ENTITY_NAME, PEG_ENTITY_NAME
+from mjlab_rl_assembly.cfg.constants import (
+    EE_SITE_NAME,
+    PEG_SITE_NAME,
+    PEG_PEAK_SITE_NAME,
+    UR5E_ENTITY_NAME,
+    PEG_ENTITY_NAME,
+)
 
 
 
@@ -17,8 +23,12 @@ from mjlab_rl_assembly.cfg.constants import EE_SITE_NAME, PEG_SITE_NAME, UR5E_EN
 @dataclass(kw_only=True)
 class ReachTargetCommandCfg(CommandTermCfg):
     """Configuration for reaching a virtual target position."""
-    pos_tolerance: float = 0.005
-    quat_tolerance: float = 0.01
+    align_pos_tolerance: float = 0.01
+    align_quat_tolerance: float = 0.05
+    insert_pos_tolerance: float = 0.005
+    insert_quat_tolerance: float = 0.01
+    failure_pos_tolerance: float = 0.2
+    failure_consecutive_threshold: int = 10  # 连续多少次超出容差才判断为失败
     # difficulty: Literal["fixed", "dynamic"] = "fixed"
 
     # @dataclass
@@ -52,12 +62,37 @@ class ReachTargetCommand(CommandTerm):
         self.target_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.target_quat = torch.zeros(self.num_envs, 4, device=self.device)
         self.target_quat[:, 0] = 1.0  # 初始化为单位四元数
+        # stage: 0=align (peak), 1=insert (root)
+        self.stage = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        # store both peak and root target poses (world frame)
+        self.peak_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        self.peak_quat = torch.zeros(self.num_envs, 4, device=self.device)
+        self.peak_quat[:, 0] = 1.0
+
+        self.root_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        self.root_quat = torch.zeros(self.num_envs, 4, device=self.device)
+        self.root_quat[:, 0] = 1.0
+
         # self.episode_success = torch.zeros(self.num_envs, device=self.device)
 
+        # metrics
         self.metrics["pos_error"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["quat_error"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["success"] = torch.zeros(self.num_envs, device=self.device)
-        # self.metrics["episode_success"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["failure"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["stage"] = self.stage.clone().float()
+
+        # 连续失败计数器
+        self.failure_counter = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+
+        # align stage metrics (to peak)
+        self.metrics["align_pos_error"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["align_quat_error"] = torch.zeros(self.num_envs, device=self.device)
+
+        # insert stage metrics (to root)
+        self.metrics["insert_pos_error"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["insert_quat_error"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
@@ -86,26 +121,70 @@ class ReachTargetCommand(CommandTerm):
         dot = torch.sum(self.target_quat * ee_quat_w, dim=-1)
         dot = torch.clamp(torch.abs(dot), max=1.0)
         quat_error = 2.0 * torch.acos(dot) # err = 2 * arccos(|q_t \dot q_e|) 内积计算四元数角度
+
+        # align errors (to peak)
+        align_pos_error = torch.norm(self.peak_pos - ee_pos_w, dim=-1)
+        dot_align = torch.sum(self.peak_quat * ee_quat_w, dim=-1)
+        dot_align = torch.clamp(torch.abs(dot_align), max=1.0)
+        align_quat_error = 2.0 * torch.acos(dot_align)
+
+        # insert errors (to root)
+        insert_pos_error = torch.norm(self.root_pos - ee_pos_w, dim=-1)
+        dot_insert = torch.sum(self.root_quat * ee_quat_w, dim=-1)
+        dot_insert = torch.clamp(torch.abs(dot_insert), max=1.0)
+        insert_quat_error = 2.0 * torch.acos(dot_insert)
+
+        # failure is determined by consecutive pos_error > failure_pos_tolerance
+        pos_error_exceeds = (pos_error > self.cfg.failure_pos_tolerance)
         
-        success = torch.logical_and(pos_error.abs() < self.cfg.pos_tolerance, 
-                                    quat_error.abs() < self.cfg.quat_tolerance).float()
+        # 更新连续失败计数器
+        self.failure_counter[pos_error_exceeds] += 1
+        self.failure_counter[~pos_error_exceeds] = 0  # 重置计数器
+        
+        # 只有连续超出次数达到阈值才判断为失败
+        failure = (self.failure_counter >= self.cfg.failure_consecutive_threshold).float()
 
+        # determine success depending on stage
+        at_goal_align = torch.logical_and(
+            align_pos_error.abs() < self.cfg.align_pos_tolerance,
+            align_quat_error.abs() < self.cfg.align_quat_tolerance,
+        )
 
-        # Latch episode_success to 1 once goal is reached
-        # self.episode_success = torch.maximum(self.episode_success, at_goal)
+        at_goal_insert = torch.logical_and(
+            insert_pos_error.abs() < self.cfg.insert_pos_tolerance,
+            insert_quat_error.abs() < self.cfg.insert_quat_tolerance,
+        )
 
+        # update stage: once aligned, move to insert (latched)
+        stage_long = self.stage.clone()
+        stage_long[at_goal_align] = 1
+        self.stage = stage_long
+
+        # success is determined by insert success (stage==1 and at_goal_insert)
+        success = (self.stage == 1).float() * at_goal_insert.float()
+
+        # update metrics
         self.metrics["pos_error"] = pos_error
         self.metrics["quat_error"] = quat_error
         self.metrics["success"] = success
-        # self.metrics["episode_success"] = self.episode_success
+        self.metrics["failure"] = failure
+        self.metrics["stage"] = self.stage.clone().float()
+
+        self.metrics["align_pos_error"] = align_pos_error
+        self.metrics["align_quat_error"] = align_quat_error
+        self.metrics["insert_pos_error"] = insert_pos_error
+        self.metrics["insert_quat_error"] = insert_quat_error
 
     def compute_success(self) -> torch.Tensor:
-        return self.metrics["at_goal"]
+        # success based on insert stage
+        return self.metrics["success"]
 
     def _resample_command(self, env_ids: torch.Tensor) -> None: # 继承
         """
         重新生成目标位置和 peg 位置
         """
+        self.failure_counter[env_ids] = 0
+        self.stage[env_ids] = 0
         pass
         # n = len(env_ids)
 
@@ -146,20 +225,52 @@ class ReachTargetCommand(CommandTerm):
     def _update_command(self) -> None: # 继承
         # Get peg entity
         peg_entity: Entity = self._env.scene[PEG_ENTITY_NAME]
-        # Set target position to peg's PEG_SITE_NAME site with z-axis offset
-        # First, find the site ID for PEG_SITE_NAME
-        (site_ids, site_names) = peg_entity.find_sites(PEG_SITE_NAME)
-        if site_names[0] == PEG_SITE_NAME:
-            peg_site_id = site_ids[0]
-            peg_site_pos = peg_entity.data.site_pos_w[:, peg_site_id]
-            peg_site_quat = peg_entity.data.site_quat_w[:, peg_site_id]
-
-            self.target_pos[:] = peg_site_pos
-            self.target_quat[:] = peg_site_quat
+        # Read both peak and root sites from peg
+        # peak
+        peak_site_ids, peak_site_names = peg_entity.find_sites(PEG_PEAK_SITE_NAME)
+        if len(peak_site_ids) > 0 and peak_site_names[0] == PEG_PEAK_SITE_NAME:
+            peak_id = peak_site_ids[0]
+            peak_pos = peg_entity.data.site_pos_w[:, peak_id]
+            peak_quat = peg_entity.data.site_quat_w[:, peak_id]
         else:
-            # Fallback to peg root position if site not found
-            self.target_pos[:] = peg_entity.data.site_pos_w[:, 0]
-            self.target_quat[:] = peg_entity.data.site_quat_w[:, 0]
+            peak_pos = peg_entity.data.site_pos_w[:, 0]
+            peak_quat = peg_entity.data.site_quat_w[:, 0]
+
+        # root (peg site)
+        root_site_ids, root_site_names = peg_entity.find_sites(PEG_SITE_NAME)
+        if len(root_site_ids) > 0 and root_site_names[0] == PEG_SITE_NAME:
+            root_id = root_site_ids[0]
+            root_pos = peg_entity.data.site_pos_w[:, root_id]
+            root_quat = peg_entity.data.site_quat_w[:, root_id]
+        else:
+            root_pos = peg_entity.data.site_pos_w[:, 0]
+            root_quat = peg_entity.data.site_quat_w[:, 0]
+
+        # write into command buffers
+        self.peak_pos[:] = peak_pos
+        self.peak_quat[:] = peak_quat
+        self.root_pos[:] = root_pos
+        self.root_quat[:] = root_quat
+
+        # set active target depending on stage per-env
+        # stage == 0 -> align -> target is peak
+        # stage == 1 -> insert -> target is root
+        if self.num_envs == 1:
+            if int(self.stage.item()) == 0:
+                self.target_pos[:] = self.peak_pos
+                self.target_quat[:] = self.peak_quat
+            else:
+                self.target_pos[:] = self.root_pos
+                self.target_quat[:] = self.root_quat
+        else:
+            mask_align = (self.stage == 0)
+            mask_insert = (self.stage == 1)
+            if mask_align.any():
+                self.target_pos[mask_align] = self.peak_pos[mask_align]
+                self.target_quat[mask_align] = self.peak_quat[mask_align]
+            if mask_insert.any():
+                self.target_pos[mask_insert] = self.root_pos[mask_insert]
+                self.target_quat[mask_insert] = self.root_quat[mask_insert]
         # self.target_pos[env_ids] = peg_pos
         # self.target_quat[env_ids] = peg_quat
 

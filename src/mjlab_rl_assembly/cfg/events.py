@@ -837,3 +837,128 @@ def reset_peg_pose_and_ur5e_ik(
         return 1
 
     return 0
+
+
+# ----------------------
+# Dataset-based reset
+# ----------------------
+_cached_reset_dataset = None
+
+
+def reset_peg_pose_and_ur5e_ik_from_dataset(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    dataset_path: str = "src/mjlab_rl_assembly/utils/feasible_reset_dataset.npz",
+    qpos_noise_std: float = 0.001,
+    add_env_origin: bool = True,
+) -> int:
+    """Reset using a precomputed dataset (npz). Adds small random noise to joints."""
+    global _cached_reset_dataset
+
+    if _cached_reset_dataset is None:
+        import numpy as _np
+
+        _cached_reset_dataset = _np.load(dataset_path, allow_pickle=True)
+
+    data = _cached_reset_dataset
+
+    # fields expected from monte_carlo_sample.save_dataset
+    peg_body_pos = data["peg_body_pos"]  # (N,3)
+    peg_body_quat = data["peg_body_quat_wxyz"]  # (N,4)
+    ur_q_init = data["ur_joint_pos_initial"]  # (N, num_joints)
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(device=env.device, dtype=torch.long)
+
+    n = len(env_ids)
+    if n == 0:
+        return 0
+
+    import numpy as np
+
+    # sample random indices for each env
+    idx = np.random.randint(0, ur_q_init.shape[0], size=n)
+
+    sampled_q = torch.tensor(ur_q_init[idx], dtype=torch.float32, device=env.device)
+
+    # add small gaussian noise to joints
+    noise = torch.randn_like(sampled_q) * float(qpos_noise_std)
+    sampled_q_noisy = sampled_q + noise
+
+    # write joint states (map dataset joint columns to entity local joint ids)
+    robot_entity: Entity = env.scene[UR5E_ENTITY_NAME]
+
+    zero_vel = torch.zeros_like(sampled_q_noisy)
+
+    # Determine joint ids from dataset if available
+    joint_ids_arg = None
+    if "joint_names" in data:
+        raw_joint_names = data["joint_names"]
+        try:
+            joint_names_list = [str(x) for x in raw_joint_names.tolist()]
+        except Exception:
+            joint_names_list = [str(x) for x in raw_joint_names]
+
+        try:
+            # preserve order to match dataset columns
+            ids, matched = robot_entity.find_joints(joint_names_list, preserve_order=True)
+            if len(ids) != sampled_q_noisy.shape[1]:
+                raise ValueError("found joint count mismatch")
+            joint_ids_arg = torch.tensor(ids, dtype=torch.long, device=env.device)
+        except Exception:
+            # fallback: try exact name matching against robot_entity.joint_names
+            name_to_idx = {name: i for i, name in enumerate(robot_entity.joint_names)}
+            ids = []
+            for name in joint_names_list:
+                if name in name_to_idx:
+                    ids.append(name_to_idx[name])
+                else:
+                    # try suffix match
+                    found = False
+                    for n in robot_entity.joint_names:
+                        if n.endswith(name):
+                            ids.append(name_to_idx[n])
+                            found = True
+                            break
+                    if not found:
+                        raise ValueError(f"Cannot match dataset joint name '{name}' to entity joints")
+            joint_ids_arg = torch.tensor(ids, dtype=torch.long, device=env.device)
+    else:
+        # no joint names in dataset: assume dataset contains the first K joints
+        k = sampled_q_noisy.shape[1]
+        if k <= robot_entity.num_joints:
+            joint_ids_arg = torch.arange(0, k, dtype=torch.long, device=env.device)
+        else:
+            raise ValueError("Dataset joint count exceeds entity joint count and no joint_names provided.")
+
+    robot_entity.write_joint_state_to_sim(
+        sampled_q_noisy,
+        zero_vel,
+        joint_ids=joint_ids_arg,
+        env_ids=env_ids,
+    )
+
+    # peg pose: use peg_body_pos/quaternion and write as mocap pose (world frame + env origin)
+    peg_entity: Entity = env.scene[PEG_ENTITY_NAME]
+
+    sampled_pos = peg_body_pos[idx]
+    sampled_quat = peg_body_quat[idx]
+
+    sampled_pos_t = torch.tensor(sampled_pos, dtype=torch.float32, device=env.device)
+    sampled_quat_t = torch.tensor(sampled_quat, dtype=torch.float32, device=env.device)
+
+    if add_env_origin:
+        sampled_pos_t = sampled_pos_t + env.scene.env_origins[env_ids]
+
+    peg_pose = torch.cat([sampled_pos_t, sampled_quat_t], dim=-1)
+
+    peg_entity.write_mocap_pose_to_sim(
+        peg_pose,
+        env_ids=env_ids,
+    )
+
+    env.sim.forward()
+
+    return 0

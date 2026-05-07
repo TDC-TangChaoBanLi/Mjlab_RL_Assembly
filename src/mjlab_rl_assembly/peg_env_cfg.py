@@ -37,15 +37,24 @@ from mjlab.rl import (
 # mdp
 from mjlab.envs.mdp.observations import joint_pos_rel, joint_vel_rel, last_action
 from mjlab.envs.mdp.events import reset_root_state_uniform
-from mjlab.envs.mdp.rewards import action_rate_l2, joint_pos_limits
+from mjlab.envs.mdp.rewards import action_rate_l2, joint_pos_limits, is_alive
 from mjlab.envs.mdp.terminations import time_out
 
 from mjlab_rl_assembly.cfg.scence import get_peg_entity_cfg, get_ur5e_entity_cfg
 from mjlab_rl_assembly.cfg.commands import ReachTargetCommandCfg
-from mjlab_rl_assembly.cfg.events import reset_peg_pose_and_ur5e_ik
-from mjlab_rl_assembly.cfg.rewards import pos_reach_reward, quat_reach_reward
-from mjlab_rl_assembly.cfg.observations import target_pose_ee
-from mjlab_rl_assembly.cfg.terminations import success_peg_in_hole
+from mjlab_rl_assembly.cfg.events import (
+    reset_peg_pose_and_ur5e_ik,
+    reset_peg_pose_and_ur5e_ik_from_dataset,
+)
+from mjlab_rl_assembly.cfg.rewards import (
+    pos_reach_reward,
+    quat_reach_reward,
+    align_stage_reward,
+    insert_stage_reward,
+)
+from mjlab_rl_assembly.cfg.observations import target_pose_ee, filtered_force_torque
+from mjlab_rl_assembly.cfg.terminations import success_peg_in_hole, failure_peg_in_hole
+from mjlab_rl_assembly.cfg.utils import check_finite_tensor
 from mjlab_rl_assembly.cfg.constants import (
     EE_SITE_NAME,
     PEG_SITE_NAME,
@@ -73,16 +82,24 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             # sensors=(ee_ground_collision_cfg,),
         )
     
-
+    def joint_pos_rel_debug(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg):
+        obs = joint_pos_rel(env, asset_cfg=asset_cfg)
+        return check_finite_tensor("joint_pos_rel", obs)
+    def target_pose_ee_debug(env: ManagerBasedRlEnv, command_name: str, asset_cfg: SceneEntityCfg):
+        obs = target_pose_ee(env, command_name, asset_cfg)
+        return check_finite_tensor("target_pose_ee", obs)
+    def last_action_debug(env: ManagerBasedRlEnv):
+        obs = last_action(env)
+        return check_finite_tensor("last_action", obs)
     # Actor 观察项
     actor_terms = {
-        "joint_pos": ObservationTermCfg(
-            func=joint_pos_rel,
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-            params={
-                "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
-            },
-        ),
+        # "joint_pos": ObservationTermCfg(
+        #     func=joint_pos_rel_debug,
+        #     noise=Unoise(n_min=-0.01, n_max=0.01),
+        #     params={
+        #         "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
+        #     },
+        # ),
         # "joint_vel": ObservationTermCfg(
         #     func=joint_vel_rel,
         #     noise=Unoise(n_min=-1.5, n_max=1.5),
@@ -96,7 +113,10 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
                 "command_name": "reach_target",
                 "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, site_names=(EE_SITE_NAME,)),  # Set per-robot.
             },
-            noise=Unoise(n_min=-0.01, n_max=0.01),
+            # noise=Unoise(n_min=-0.002, n_max=0.002),
+        ),
+        "ft_sensor": ObservationTermCfg(
+            func=lambda env: filtered_force_torque(env, alpha=0.2),
         ),
         "actions": ObservationTermCfg(
             func=last_action,
@@ -130,11 +150,11 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
 
             # 策略输出动作缩放
             # 例如 action 前三维为 [-1,1] 时，对应末端位置增量约 ±1 cm
-            delta_pos_scale=0.01,
+            delta_pos_scale=0.005,
 
             # 后三维为姿态增量，单位 rad
             # 例如 ±0.05 rad，约 ±2.9 deg
-            delta_ori_scale=0.05,
+            delta_ori_scale=0.002,
 
             # DLS IK 阻尼
             damping=0.05,
@@ -144,7 +164,7 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
 
             # 位姿误差权重
             position_weight=1.0,
-            orientation_weight=0.2,
+            orientation_weight=1.0,
 
             # 软关节限位回避
             joint_limit_weight=0.05,
@@ -162,8 +182,11 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         "reach_target": ReachTargetCommandCfg(
             resampling_time_range=(8.0, 12.0),
             debug_vis=True,
-            pos_tolerance = 0.005,
-            quat_tolerance = 0.1,
+            align_pos_tolerance = 0.01,
+            align_quat_tolerance = 0.05,
+            insert_pos_tolerance = 0.005,
+            insert_quat_tolerance = 0.02,
+            failure_pos_tolerance = 0.2,
         )
     }
 
@@ -189,7 +212,7 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
                     "z_start": 0.3,
                     "z_end": 0.7,
                     "roll_range": (-0.2, 0.2),
-                    "pitch_range": (-0.2, 0.2),
+                    "pitch_range": (-1.0, 1.0),
                     "yaw_offset_range": (-0.2, 0.2),
                 },
                 "z_offset": -0.1,
@@ -201,25 +224,34 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
                 "robot_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",)),
             },
         ),
+        # "reset_peg_and_ur5e_ik_from_dataset": EventTermCfg(
+        #     func=reset_peg_pose_and_ur5e_ik_from_dataset,
+        #     mode="reset",
+        #     params={
+        #         "dataset_path": "src/mjlab_rl_assembly/utils/reset_dataset.npz",
+        #         "qpos_noise_std": 0.01,
+        #     },
+        # ),
     }
 
     # 奖励项
     rewards: dict[str, RewardTermCfg] = {
-        "pos_reach_macro": RewardTermCfg(
-            func=pos_reach_reward,
+        "align_stage_macro": RewardTermCfg(
+            func=align_stage_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "std": 0.2,
+                "quat_std": 0.2,
+                "pos_std": 0.05,
             },
         ),
-        "quat_reach_macro": RewardTermCfg(
-            func=quat_reach_reward,
+        "insert_stage_macro": RewardTermCfg(
+            func=insert_stage_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.5,
-                "pos_std": 0.2,
+                "quat_std": 0.1,
+                "pos_std": 0.02,
             },
         ),
         "pos_reach_micro": RewardTermCfg(
@@ -235,7 +267,7 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.03,
+                "quat_std": 0.05,
                 "pos_std": 0.01,
             },
         ),
@@ -250,6 +282,10 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
             },
         ),
+        "run_time": RewardTermCfg(
+            func=is_alive,
+            weight=-0.1,
+        ),
     }
 
     # 终止条件
@@ -259,6 +295,12 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         "success_peg_in_hole": TerminationTermCfg(
             func=success_peg_in_hole,
+            params={
+                "command_name": "reach_target",
+            },
+        ),
+        "failure_peg_in_hole": TerminationTermCfg(
+            func=failure_peg_in_hole,
             params={
                 "command_name": "reach_target",
             },
@@ -292,7 +334,7 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         )
     sim = SimulationCfg(
             # nconmax=55,
-            njmax=600,
+            njmax=1000,
             mujoco=MujocoCfg(
                 timestep=0.001,
                 iterations=10,

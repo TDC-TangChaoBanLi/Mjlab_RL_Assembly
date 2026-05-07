@@ -1,10 +1,5 @@
 
 
-
-
-
-from re import S
-
 import torch
 
 
@@ -34,3 +29,21 @@ def success_peg_in_hole(
 
     return success
 
+
+def failure_peg_in_hole(
+    env: ManagerBasedRlEnv,
+    command_name: str
+) -> torch.Tensor:
+    """
+    失败终止条件：
+    UR_EE_SITE 与 PEG_SITE 的位置误差或姿态误差超出容差。
+    """
+    command = env.command_manager.get_term(command_name)
+    if not isinstance(command, ReachTargetCommand):
+        raise TypeError(
+            f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
+        )
+
+    failure: torch.Tensor = command.metrics["failure"]
+    failure = failure.bool()
+    return failure
