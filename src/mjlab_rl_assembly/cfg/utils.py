@@ -22,3 +22,6 @@ def check_finite_tensor(name: str, x: torch.Tensor) -> torch.Tensor:
         raise RuntimeError(f"{name} contains NaN or Inf.")
 
     return x
+
+
+

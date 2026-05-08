@@ -11,7 +11,7 @@
             "module": "mjlab.scripts.play",
             "args": [
                 "Mjlab-Peg",
-                "--checkpoint-file", "./logs/rsl_rl/peg_in_hole/2026-05-05_21-21-25/model_2000.pt",
+                "--checkpoint-file", "./logs/rsl_rl/peg_in_hole/2026-05-07_19-25-54/model_4999.pt",
                 "--viewer", "viser",
                 "--num-envs", "9"
             ],

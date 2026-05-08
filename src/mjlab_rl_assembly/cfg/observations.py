@@ -4,68 +4,77 @@ import torch
 
 
 from mjlab.entity import Entity
+from mjlab.sensor import BuiltinSensor
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply, quat_inv, quat_mul
 
 
-from mjlab_rl_assembly.cfg.constants import EE_SITE_NAME, PEG_SITE_NAME, UR5E_ENTITY_NAME, PEG_ENTITY_NAME
+from mjlab_rl_assembly.cfg.constants import EE_SITE_NAME, PEG_SITE_NAME, UR5E_ENTITY_NAME, PEG_ENTITY_NAME, FORCE_SENSOR_NAME, TORQUE_SENSOR_NAME
 from .commands import ReachTargetCommand
 
 import mujoco
 
 
+def get_stage(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+) -> torch.Tensor:
+    """
+    Get the current stage from the command.
+
+    Returns:
+        Tensor of shape (num_envs, 1): stage value (0 for align, 1 for insert)
+    """
+    command = env.command_manager.get_term(command_name)
+
+    if not isinstance(command, ReachTargetCommand):
+        raise TypeError(
+            f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
+        )
+
+    stage = command.stage.clone().float().unsqueeze(-1)
+    return stage
+
+
 def filtered_force_torque(
     env: ManagerBasedRlEnv,
-    force_sensor_name: str = "ur_ft_frame_SENSOR_FORCE",
-    torque_sensor_name: str = "ur_ft_frame_SENSOR_TORQUE",
+    force_sensor_name: str = "ee_force_sensor",
+    torque_sensor_name: str = "ee_torque_sensor",
     alpha: float = 0.2,
 ) -> torch.Tensor:
     """Read force and torque sensors from MuJoCo, apply EWMA filtering per env.
 
+    Args:
+        env: The environment
+        force_sensor_name: Name of the force sensor (unused, using FORCE_SENSOR_NAME from constants)
+        torque_sensor_name: Name of the torque sensor (unused, using TORQUE_SENSOR_NAME from constants)
+        alpha: EWMA filter coefficient (0 < alpha <= 1, higher = more responsive)
+
     Returns (num_envs, 6) tensor: [fx, fy, fz, tx, ty, tz]
     """
-    mj_model = env.sim.mj_model
-    mj_data = env.sim.mj_data
 
-    # get sensor ids
-    fid = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, force_sensor_name)
-    tid = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, torque_sensor_name)
+    force_sensor: BuiltinSensor = env.scene[UR5E_ENTITY_NAME + "/" + FORCE_SENSOR_NAME]
+    torque_sensor: BuiltinSensor = env.scene[UR5E_ENTITY_NAME + "/" + TORQUE_SENSOR_NAME]
 
-    if fid < 0 or tid < 0:
-        # return zeros if sensors not found
-        return torch.zeros(env.num_envs, 6, device=env.device, dtype=torch.float32)
+    raw_force = force_sensor.data  # type: torch.Tensor[torch.float32, (num_envs, 3)]
+    raw_torque = torque_sensor.data  # type: torch.Tensor[torch.float32, (num_envs, 3)]
 
-    # sensor addresses and dims
-    f_adr = int(mj_model.sensor_adr[fid])
-    f_dim = int(mj_model.sensor_dim[fid])
-    t_adr = int(mj_model.sensor_adr[tid])
-    t_dim = int(mj_model.sensor_dim[tid])
+    # Combine force and torque into (num_envs, 6) tensor
+    raw = torch.cat([raw_force, raw_torque], dim=-1)
 
-    # read raw sensor data from mj_data.sensordata (flat array)
-    # assume sensors give 3 dims each
-    raw_force = torch.tensor(mj_data.sensordata[f_adr : f_adr + f_dim], device=env.device, dtype=torch.float32)
-    raw_torque = torch.tensor(mj_data.sensordata[t_adr : t_adr + t_dim], device=env.device, dtype=torch.float32)
+    # Initialize or get previous filtered state
+    key = f"_ewma_ft_{FORCE_SENSOR_NAME}_{TORQUE_SENSOR_NAME}"
+    if not hasattr(force_sensor, "_obs_state"):
+        force_sensor._obs_state = {}
 
-    # sensordata is global for whole sim; assume sensor data per-env packaged elsewhere.
-    # For single-env setups this returns a single 3-vector each.
-    raw = torch.cat([raw_force, raw_torque], dim=0).unsqueeze(0)  # (1,6)
+    if key not in force_sensor._obs_state:
+        force_sensor._obs_state[key] = raw.clone()
 
-    # caching EWMA state on env.scene (per-sensor key)
-    key = f"_ewma_ft_{force_sensor_name}_{torque_sensor_name}"
-    if not hasattr(env.scene, "_obs_state"):
-        env.scene._obs_state = {}
-
-    if key not in env.scene._obs_state:
-        env.scene._obs_state[key] = raw.clone()
-
-    prev = env.scene._obs_state[key]
+    # Apply EWMA filtering: y_t = alpha * x_t + (1 - alpha) * y_{t-1}
+    prev = force_sensor._obs_state[key]
     updated = alpha * raw + (1.0 - alpha) * prev
-    env.scene._obs_state[key] = updated
-
-    # Expand/replicate to num_envs if necessary
-    if updated.shape[0] == 1 and env.num_envs > 1:
-        updated = updated.expand(env.num_envs, -1)
+    force_sensor._obs_state[key] = updated
 
     return updated.to(device=env.device, dtype=torch.float32)
 

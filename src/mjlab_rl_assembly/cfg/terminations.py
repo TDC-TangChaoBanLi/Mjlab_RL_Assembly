@@ -6,6 +6,8 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 
 
+from .observations import filtered_force_torque
+
 
 from .commands import ReachTargetCommand
 
@@ -47,3 +49,36 @@ def failure_peg_in_hole(
     failure: torch.Tensor = command.metrics["failure"]
     failure = failure.bool()
     return failure
+
+
+def ft_exceed_limit(
+    env: ManagerBasedRlEnv,
+    force_limit: float = 500.0,
+    torque_limit: float = 50.0,
+) -> torch.Tensor:
+    """
+    失败终止条件：
+    力或力矩传感器的值超过设定的阈值。
+
+    Args:
+        env: The environment
+        force_limit: Maximum allowed force magnitude (N)
+        torque_limit: Maximum allowed torque magnitude (N*m)
+
+    Returns:
+        Tensor of shape (num_envs,): True if force or torque exceeds limit
+    """
+    ft = filtered_force_torque(env)
+
+    # Separate force and torque
+    force = ft[..., :3]
+    torque = ft[..., 3:]
+
+    # Compute magnitudes
+    force_mag = torch.norm(force, dim=-1)
+    torque_mag = torch.norm(torque, dim=-1)
+
+    # Check if either exceeds limit
+    exceed = torch.logical_or(force_mag > force_limit, torque_mag > torque_limit)
+
+    return exceed

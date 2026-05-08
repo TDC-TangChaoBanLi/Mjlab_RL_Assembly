@@ -12,3 +12,8 @@ PEG_PEAK_SITE_NAME = "_peg_peak"
 # Entity names
 UR5E_ENTITY_NAME = "UR5e"
 PEG_ENTITY_NAME = "peg"
+
+
+# Sensor names
+FORCE_SENSOR_NAME = "ur_ft_frame_SENSOR_FORCE"
+TORQUE_SENSOR_NAME = "ur_ft_frame_SENSOR_TORQUE"

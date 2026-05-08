@@ -8,6 +8,7 @@ import torch
 from mjlab.scene import SceneCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.entity import Entity
+from mjlab.sensor import BuiltinSensorCfg, ObjRef # 内置传感器
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.envs.mdp.actions import DifferentialIKActionCfg
@@ -18,6 +19,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.reward_manager import RewardTermCfg # 奖励函数
 from mjlab.managers.termination_manager import TerminationTermCfg # 终止条件
 from mjlab.managers.curriculum_manager import CurriculumTermCfg # 课程管理
+
 
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
@@ -51,15 +53,18 @@ from mjlab_rl_assembly.cfg.rewards import (
     quat_reach_reward,
     align_stage_reward,
     insert_stage_reward,
+    ft_penalty,
 )
-from mjlab_rl_assembly.cfg.observations import target_pose_ee, filtered_force_torque
-from mjlab_rl_assembly.cfg.terminations import success_peg_in_hole, failure_peg_in_hole
+from mjlab_rl_assembly.cfg.observations import target_pose_ee, filtered_force_torque, get_stage
+from mjlab_rl_assembly.cfg.terminations import success_peg_in_hole, failure_peg_in_hole, ft_exceed_limit
 from mjlab_rl_assembly.cfg.utils import check_finite_tensor
 from mjlab_rl_assembly.cfg.constants import (
     EE_SITE_NAME,
     PEG_SITE_NAME,
     UR5E_ENTITY_NAME,
     PEG_ENTITY_NAME,
+    FORCE_SENSOR_NAME,
+    TORQUE_SENSOR_NAME,
 )
 
 
@@ -78,8 +83,19 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             entities={
                 UR5E_ENTITY_NAME: get_ur5e_entity_cfg(), # 机械臂
                 PEG_ENTITY_NAME: get_peg_entity_cfg()  # 机械臂端
-                }, 
-            # sensors=(ee_ground_collision_cfg,),
+            }, 
+            # sensors=(
+            #     BuiltinSensorCfg(
+            #         name="ee_force_sensor",
+            #         sensor_type="force",
+            #         obj=ObjRef(type="site", name=FORCE_SENSOR_NAME,entity=UR5E_ENTITY_NAME),
+            #     ),
+            #     BuiltinSensorCfg(
+            #         name="ee_torque_sensor",
+            #         sensor_type="torque",
+            #         obj=ObjRef(type="site", name=TORQUE_SENSOR_NAME,entity=UR5E_ENTITY_NAME),
+            #     ),
+            # ),
         )
     
     def joint_pos_rel_debug(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg):
@@ -116,10 +132,16 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             # noise=Unoise(n_min=-0.002, n_max=0.002),
         ),
         "ft_sensor": ObservationTermCfg(
-            func=lambda env: filtered_force_torque(env, alpha=0.2),
+            func=lambda env: filtered_force_torque(env ,alpha=0.2),
         ),
         "actions": ObservationTermCfg(
             func=last_action,
+        ),
+        "stage": ObservationTermCfg(
+            func=get_stage,
+            params={
+                "command_name": "reach_target",
+            },
         ),
     }
 
@@ -150,11 +172,11 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
 
             # 策略输出动作缩放
             # 例如 action 前三维为 [-1,1] 时，对应末端位置增量约 ±1 cm
-            delta_pos_scale=0.005,
+            delta_pos_scale=0.002,
 
             # 后三维为姿态增量，单位 rad
             # 例如 ±0.05 rad，约 ±2.9 deg
-            delta_ori_scale=0.002,
+            delta_ori_scale=0.0005,
 
             # DLS IK 阻尼
             damping=0.05,
@@ -236,55 +258,64 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
 
     # 奖励项
     rewards: dict[str, RewardTermCfg] = {
-        "align_stage_macro": RewardTermCfg(
+        "align_reward": RewardTermCfg( # 对齐奖励
             func=align_stage_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.2,
-                "pos_std": 0.05,
+                "quat_std": 0.1,
+                "pos_std": 0.01,
             },
         ),
-        "insert_stage_macro": RewardTermCfg(
+        "insert_reward": RewardTermCfg( # 插入奖励
             func=insert_stage_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.1,
-                "pos_std": 0.02,
+                "quat_std": 0.05,
+                "pos_std": 0.005,
             },
         ),
-        "pos_reach_micro": RewardTermCfg(
+        "pos_reach_macro": RewardTermCfg( # 位置奖励
             func=pos_reach_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "std": 0.01,
+                "std": 0.1,
             },
         ),
-        "quat_reach_micro": RewardTermCfg(
+        "quat_reach_macro": RewardTermCfg( # 姿态奖励
             func=quat_reach_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.05,
-                "pos_std": 0.01,
+                "quat_std": 0.5,
+                "pos_std": 0.1,
             },
         ),
-        "action_rate_l2": RewardTermCfg(
+        "action_rate_l2": RewardTermCfg( # 动作率惩罚
             func=action_rate_l2, 
             weight=-0.01
         ),
-        "joint_pos_limits": RewardTermCfg(
+        "joint_pos_limits": RewardTermCfg( # 关节位置惩罚
             func=joint_pos_limits,
             weight=0,#-10.0,
             params={
                 "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
             },
         ),
-        "run_time": RewardTermCfg(
+        "run_time": RewardTermCfg( # 运行时间惩罚
             func=is_alive,
             weight=-0.1,
+        ),
+        "ft_penalty": RewardTermCfg( # 力矩传感器惩罚
+            func=ft_penalty,
+            weight=-0.5,
+            params={
+                "alpha": 0.2,
+                "force_std": 30.0,
+                "torque_std": 15.0,
+            },
         ),
     }
 
@@ -303,6 +334,13 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             func=failure_peg_in_hole,
             params={
                 "command_name": "reach_target",
+            },
+        ),
+        "ft_exceed_limit": TerminationTermCfg(
+            func=ft_exceed_limit,
+            params={
+                "force_limit": 60.0,
+                "torque_limit": 30.0,
             },
         ),
     }
