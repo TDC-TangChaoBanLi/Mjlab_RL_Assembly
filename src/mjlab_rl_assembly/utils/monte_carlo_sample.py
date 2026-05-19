@@ -69,21 +69,24 @@ class SamplerConfig:
     # sampling
     num_samples: int = 500
     max_trials: int = 200000
-    workspace_radius: float = 1.0
     seed: int = 0
+
+    # 环形桶采样参数（与 reset_peg_pose_and_ur5e_ik 一致）
+    inner_radius: float = 0.2
+    outer_radius: float = 0.5
+    z_start: float = 0.3
+    z_end: float = 0.7
 
     # 初始末端位置相对 PEG_SITE 的偏移
     # +0.10 表示沿 PEG_SITE 局部 +z 方向 10 cm
     # -0.10 表示沿 PEG_SITE 局部 -z 方向 10 cm
     ee_offset_z: float = 0.10
 
-    # peg 姿态采样
-    # "uniform_quat"：SO(3) 随机姿态
-    # "euler_range"：按 roll/pitch/yaw 范围采样
-    peg_orientation_mode: str = "uniform_quat"
-    roll_range: tuple[float, float] = (-math.pi, math.pi)
-    pitch_range: tuple[float, float] = (-math.pi, math.pi)
-    yaw_range: tuple[float, float] = (-math.pi, math.pi)
+    # peg 姿态采样参数（与 reset_peg_pose_and_ur5e_ik 一致）
+    # yaw 角与采样位置相关：yaw = atan2(y, x) + π/2 + yaw_offset
+    roll_range: tuple[float, float] = (-0.2, 0.2)
+    pitch_range: tuple[float, float] = (-0.5, 0.5)
+    yaw_offset_range: tuple[float, float] = (-0.2, 0.2)
 
     # IK
     ik_iterations: int = 120
@@ -185,38 +188,61 @@ def uniform_quat_wxyz(rng: np.random.Generator) -> np.ndarray:
     return q / (np.linalg.norm(q) + 1e-12)
 
 
-def sample_position_in_sphere(
-    rng: np.random.Generator,
-    center: np.ndarray,
-    radius: float,
-) -> np.ndarray:
-    """
-    在球体内部均匀采样。
-    """
-    direction = rng.normal(size=3)
-    direction /= np.linalg.norm(direction) + 1e-12
-
-    r = float(radius) * (rng.random() ** (1.0 / 3.0))
-    return center + r * direction
-
-
-def sample_peg_orientation(
+def sample_position_ring_bucket(
     rng: np.random.Generator,
     cfg: SamplerConfig,
 ) -> np.ndarray:
-    if cfg.peg_orientation_mode == "uniform_quat":
-        return uniform_quat_wxyz(rng)
+    """
+    在环形桶区域内均匀采样（与 reset_peg_pose_and_ur5e_ik 一致）。
 
-    if cfg.peg_orientation_mode == "euler_range":
-        roll = rng.uniform(cfg.roll_range[0], cfg.roll_range[1])
-        pitch = rng.uniform(cfg.pitch_range[0], cfg.pitch_range[1])
-        yaw = rng.uniform(cfg.yaw_range[0], cfg.yaw_range[1])
-        return euler_xyz_to_quat_wxyz(roll, pitch, yaw)
+    采样区域：
+    - XY 平面：环形区域（inner_radius <= r <= outer_radius）
+    - Z 轴：[z_start, z_end]
 
-    raise ValueError(
-        f"Unknown peg_orientation_mode: {cfg.peg_orientation_mode}. "
-        "Use 'uniform_quat' or 'euler_range'."
+    返回：
+        [x, y, z] 位置
+    """
+    u = rng.random()
+    v = rng.random()
+
+    # 环形均匀采样：确保面积均匀
+    r = math.sqrt(
+        cfg.inner_radius ** 2 + u * (cfg.outer_radius ** 2 - cfg.inner_radius ** 2)
     )
+    theta = 2.0 * math.pi * v
+
+    x = r * math.cos(theta)
+    y = r * math.sin(theta)
+    z = rng.uniform(cfg.z_start, cfg.z_end)
+
+    return np.array([x, y, z], dtype=np.float64)
+
+
+def sample_peg_orientation_with_position(
+    rng: np.random.Generator,
+    peg_body_pos: np.ndarray,
+    cfg: SamplerConfig,
+) -> np.ndarray:
+    """
+    采样 peg 姿态（与 reset_peg_pose_and_ur5e_ik 一致）。
+
+    特点：yaw 角与采样位置相关，确保 peg 大致朝向圆心方向。
+
+    Args:
+        peg_body_pos: peg body 的位置 [x, y, z]
+
+    返回：
+        wxyz 顺序的四元数
+    """
+    roll = rng.uniform(cfg.roll_range[0], cfg.roll_range[1])
+    pitch = rng.uniform(cfg.pitch_range[0], cfg.pitch_range[1])
+
+    # yaw 角与位置相关：指向圆心方向偏 90° + 随机偏移
+    yaw_base = math.atan2(peg_body_pos[1], peg_body_pos[0]) + math.pi / 2.0
+    yaw_offset = rng.uniform(cfg.yaw_offset_range[0], cfg.yaw_offset_range[1])
+    yaw = yaw_base + yaw_offset
+
+    return euler_xyz_to_quat_wxyz(roll, pitch, yaw)
 
 
 # ============================================================
@@ -869,15 +895,16 @@ def run_sampler(cfg: SamplerConfig) -> list[dict]:
         total_trials += 1
 
         # ------------------------------------------------
-        # 1. 采样 peg body 位姿
+        # 1. 采样 peg body 位姿（与 reset_peg_pose_and_ur5e_ik 一致）
         # ------------------------------------------------
-        peg_body_pos = sample_position_in_sphere(
-            rng=rng,
-            center=base_center,
-            radius=cfg.workspace_radius,
-        )
+        peg_body_pos_local = sample_position_ring_bucket(rng, cfg)
+        peg_body_pos = base_center + peg_body_pos_local
 
-        peg_body_quat = sample_peg_orientation(rng, cfg)
+        peg_body_quat = sample_peg_orientation_with_position(
+            rng=rng,
+            peg_body_pos=peg_body_pos_local,  # 使用局部坐标计算 yaw
+            cfg=cfg,
+        )
 
         # ------------------------------------------------
         # 2. 根据 peg body 位姿计算 PEG_SITE 位姿
@@ -1077,17 +1104,20 @@ def config_from_args() -> SamplerConfig:
 
     parser.add_argument("--num-samples", type=int, default=500)
     parser.add_argument("--max-trials", type=int, default=200000)
-    parser.add_argument("--workspace-radius", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
+
+    # 环形桶采样参数
+    parser.add_argument("--inner-radius", type=float, default=0.2)
+    parser.add_argument("--outer-radius", type=float, default=0.5)
+    parser.add_argument("--z-start", type=float, default=0.3)
+    parser.add_argument("--z-end", type=float, default=0.7)
 
     parser.add_argument("--ee-offset-z", type=float, default=0.10)
 
-    parser.add_argument(
-        "--peg-orientation-mode",
-        type=str,
-        default="uniform_quat",
-        choices=["uniform_quat", "euler_range"],
-    )
+    # 姿态采样参数
+    parser.add_argument("--roll-range", type=float, nargs=2, default=(-0.2, 0.2))
+    parser.add_argument("--pitch-range", type=float, nargs=2, default=(-0.5, 0.5))
+    parser.add_argument("--yaw-offset-range", type=float, nargs=2, default=(-0.2, 0.2))
 
     parser.add_argument("--ik-iterations", type=int, default=120)
     parser.add_argument("--ik-dt", type=float, default=0.01)
@@ -1123,10 +1153,15 @@ def config_from_args() -> SamplerConfig:
         peg_body_name=args.peg_body,
         num_samples=args.num_samples,
         max_trials=args.max_trials,
-        workspace_radius=args.workspace_radius,
         seed=args.seed,
+        inner_radius=args.inner_radius,
+        outer_radius=args.outer_radius,
+        z_start=args.z_start,
+        z_end=args.z_end,
         ee_offset_z=args.ee_offset_z,
-        peg_orientation_mode=args.peg_orientation_mode,
+        roll_range=tuple(args.roll_range),
+        pitch_range=tuple(args.pitch_range),
+        yaw_offset_range=tuple(args.yaw_offset_range),
         ik_iterations=args.ik_iterations,
         ik_dt=args.ik_dt,
         ik_solver=args.ik_solver,
@@ -1188,22 +1223,28 @@ def main() -> None:
         # ===============================
         # 采样数量
         # ===============================
-        num_samples=10_000,
-        max_trials=1_000_000,
-        workspace_radius=1.0,
+        num_samples=100_000,
+        max_trials=100_000_000,
         seed=0,
+
+        # ===============================
+        # 环形桶采样参数（与 reset_peg_pose_and_ur5e_ik 一致）
+        # ===============================
+        inner_radius=0.2,
+        outer_radius=0.5,
+        z_start=0.3,
+        z_end=0.7,
 
         # 初始 UR_EE_SITE 与 PEG_SITE 沿 PEG_SITE 局部 z 轴相距 10 cm
         ee_offset_z=-0.10,
 
-        # peg 姿态采样
-        # "uniform_quat" 或 "euler_range"
-        peg_orientation_mode="uniform_quat",
-
-        # 如果使用 euler_range，则这些范围生效
+        # ===============================
+        # 姿态采样参数（与 reset_peg_pose_and_ur5e_ik 一致）
+        # yaw 角与位置相关：yaw = atan2(y, x) + π/2 + yaw_offset
+        # ===============================
         roll_range=(-0.2, 0.2),
-        pitch_range=(-0.2, 0.2),
-        yaw_range=(-math.pi, math.pi),
+        pitch_range=(-0.5, 0.5),
+        yaw_offset_range=(-0.2, 0.2),
 
         # ===============================
         # IK 参数

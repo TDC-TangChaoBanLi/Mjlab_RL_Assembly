@@ -1,5 +1,6 @@
 
 
+from click import command
 import torch
 
 
@@ -8,6 +9,7 @@ from mjlab.sensor import BuiltinSensor
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply, quat_inv, quat_mul
+from mjlab.envs.mdp.observations import joint_pos_rel
 
 
 from mjlab_rl_assembly.cfg.constants import EE_SITE_NAME, PEG_SITE_NAME, UR5E_ENTITY_NAME, PEG_ENTITY_NAME, FORCE_SENSOR_NAME, TORQUE_SENSOR_NAME
@@ -39,44 +41,28 @@ def get_stage(
 
 def filtered_force_torque(
     env: ManagerBasedRlEnv,
-    force_sensor_name: str = "ee_force_sensor",
-    torque_sensor_name: str = "ee_torque_sensor",
-    alpha: float = 0.2,
+    command_name: str,
 ) -> torch.Tensor:
-    """Read force and torque sensors from MuJoCo, apply EWMA filtering per env.
+    """Get filtered force and torque sensor data from the reach_target command metrics.
 
     Args:
         env: The environment
-        force_sensor_name: Name of the force sensor (unused, using FORCE_SENSOR_NAME from constants)
-        torque_sensor_name: Name of the torque sensor (unused, using TORQUE_SENSOR_NAME from constants)
-        alpha: EWMA filter coefficient (0 < alpha <= 1, higher = more responsive)
+        force_sensor_name: Name of the force sensor (unused)
+        torque_sensor_name: Name of the torque sensor (unused)
+        alpha: EWMA filter coefficient (unused, filtering is done in command)
 
     Returns (num_envs, 6) tensor: [fx, fy, fz, tx, ty, tz]
     """
-
-    force_sensor: BuiltinSensor = env.scene[UR5E_ENTITY_NAME + "/" + FORCE_SENSOR_NAME]
-    torque_sensor: BuiltinSensor = env.scene[UR5E_ENTITY_NAME + "/" + TORQUE_SENSOR_NAME]
-
-    raw_force = force_sensor.data  # type: torch.Tensor[torch.float32, (num_envs, 3)]
-    raw_torque = torque_sensor.data  # type: torch.Tensor[torch.float32, (num_envs, 3)]
-
-    # Combine force and torque into (num_envs, 6) tensor
-    raw = torch.cat([raw_force, raw_torque], dim=-1)
-
-    # Initialize or get previous filtered state
-    key = f"_ewma_ft_{FORCE_SENSOR_NAME}_{TORQUE_SENSOR_NAME}"
-    if not hasattr(force_sensor, "_obs_state"):
-        force_sensor._obs_state = {}
-
-    if key not in force_sensor._obs_state:
-        force_sensor._obs_state[key] = raw.clone()
-
-    # Apply EWMA filtering: y_t = alpha * x_t + (1 - alpha) * y_{t-1}
-    prev = force_sensor._obs_state[key]
-    updated = alpha * raw + (1.0 - alpha) * prev
-    force_sensor._obs_state[key] = updated
-
-    return updated.to(device=env.device, dtype=torch.float32)
+    # Get the reach_target command
+    command = env.command_manager.get_term(command_name)
+    
+    if not isinstance(command, ReachTargetCommand):
+        raise TypeError(
+            f"Command 'reach_target' must be a ReachTargetCommand, got {type(command)}"
+        )
+    
+    # Return the pre-filtered sensor data from metrics
+    return command.metrics["ft_sensor"]
 
 
 
@@ -147,7 +133,6 @@ def quat_to_rotvec_safe(quat: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
 def target_pose_ee(
     env: ManagerBasedRlEnv,
     command_name: str,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg(UR5E_ENTITY_NAME),
 ) -> torch.Tensor:
     """
     Relative goal pose in end-effector frame.
@@ -171,22 +156,11 @@ def target_pose_ee(
             f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
         )
 
-    robot: Entity = env.scene[asset_cfg.name]
-
-    site_ids, site_names = robot.find_sites(EE_SITE_NAME)
-
-    if len(site_ids) == 0:
-        raise ValueError(
-            f"EE site '{EE_SITE_NAME}' not found in entity '{asset_cfg.name}'."
-        )
-
-    ee_site_id = site_ids[0]
-
     # --------------------------------------------------
     # 1. 当前末端位姿
     # --------------------------------------------------
-    ee_pos_w = robot.data.site_pos_w[:, ee_site_id]
-    ee_quat_w = robot.data.site_quat_w[:, ee_site_id]
+    ee_pos_w = command.ee_pos
+    ee_quat_w = command.ee_quat
 
     # --------------------------------------------------
     # 2. 目标位姿
@@ -258,5 +232,119 @@ def target_pose_ee(
         ],
         dim=-1,
     )
+
+    return obs
+
+
+def ee_pose_world(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+) -> torch.Tensor:
+    """
+    End-effector pose in world frame.
+
+    Returns:
+        Tensor of shape (num_envs, 7):
+        [ee_pos_w(3), ee_quat_w(4)]
+
+    含义：
+        ee_pos_w:
+            末端在世界坐标系下的位置。
+
+        ee_quat_w:
+            末端在世界坐标系下的姿态。
+    """
+    command = env.command_manager.get_term(command_name)
+
+    if not isinstance(command, ReachTargetCommand):
+        raise TypeError(
+            f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
+        )
+
+    ee_pos_w = command.ee_pos
+    ee_quat_w = command.ee_quat
+
+    obs = torch.cat(
+        [
+            ee_pos_w,
+            ee_quat_w,
+        ],
+        dim=-1,
+    )
+
+    return obs
+
+
+def target_pose_world(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+) -> torch.Tensor:
+    """
+    Relative goal pose in world frame.
+
+    Returns:
+        Tensor of shape (num_envs, 6):
+        [target_pos_ee(3), target_rotvec_ee(3)]
+
+    含义：
+        target_pos_w:
+            目标点在世界坐标系下的位置误差。
+
+        target_rotvec_w:
+            目标姿态相对于世界姿态的旋转向量误差。
+            方向表示旋转轴，模长表示旋转角，单位 rad。
+    """
+    command = env.command_manager.get_term(command_name)
+
+    if not isinstance(command, ReachTargetCommand):
+        raise TypeError(
+            f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
+        )
+
+    target_pos_w = command.target_pos
+    target_quat_w = command.target_quat
+
+    obs = torch.cat(
+        [
+            target_pos_w,
+            target_quat_w,
+        ],
+        dim=-1,
+    )
+
+    return obs
+
+
+def joint_pos_rel_with_history(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """
+    带历史缓存的关节位置观测函数。
+
+    当 joint_pos_rel 返回 NaN/Inf 时，使用上次的有效值作为替代，
+    避免观测值污染导致训练不稳定。
+
+    Args:
+        env: The environment
+        asset_cfg: Scene entity configuration for the robot
+
+    Returns:
+        Tensor of shape (num_envs, num_joints): Joint positions relative to defaults
+    """
+    # 获取原始关节位置观测
+    obs = joint_pos_rel(env, asset_cfg=asset_cfg)
+
+    # 获取或初始化历史缓存（存储在 env 的自定义属性中）
+    if not hasattr(env, '_joint_pos_rel_history'):
+        # 初始化时使用当前观测值（假设首次观测是有效的）
+        env._joint_pos_rel_history = obs.clone()
+
+    # 检测 NaN/Inf 并使用历史值替换
+    finite_mask = torch.isfinite(obs)
+    obs = torch.where(finite_mask, obs, env._joint_pos_rel_history)
+
+    # 更新历史缓存为当前有效观测
+    env._joint_pos_rel_history = obs.clone()
 
     return obs

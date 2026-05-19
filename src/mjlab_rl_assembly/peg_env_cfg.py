@@ -11,7 +11,7 @@ from mjlab.entity import Entity
 from mjlab.sensor import BuiltinSensorCfg, ObjRef # 内置传感器
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
-from mjlab.envs.mdp.actions import DifferentialIKActionCfg
+from mjlab.envs.mdp.actions import DifferentialIKActionCfg, RelativeJointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.command_manager import CommandTermCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -54,9 +54,12 @@ from mjlab_rl_assembly.cfg.rewards import (
     align_stage_reward,
     insert_stage_reward,
     ft_penalty,
+    pos_reach_rate_reward,
+    quat_reach_rate_reward,
+    stage_reward,
 )
-from mjlab_rl_assembly.cfg.observations import target_pose_ee, filtered_force_torque, get_stage
-from mjlab_rl_assembly.cfg.terminations import success_peg_in_hole, failure_peg_in_hole, ft_exceed_limit
+from mjlab_rl_assembly.cfg.observations import target_pose_ee, filtered_force_torque, get_stage, ee_pose_world, target_pose_world, joint_pos_rel_with_history
+from mjlab_rl_assembly.cfg.terminations import success_peg_in_hole, failure_peg_in_hole, ft_exceed_limit, joint_pos_rel_has_nan
 from mjlab_rl_assembly.cfg.utils import check_finite_tensor
 from mjlab_rl_assembly.cfg.constants import (
     EE_SITE_NAME,
@@ -99,23 +102,26 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         )
     
     def joint_pos_rel_debug(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg):
-        obs = joint_pos_rel(env, asset_cfg=asset_cfg)
+        obs = joint_pos_rel_with_history(env, asset_cfg=asset_cfg)
         return check_finite_tensor("joint_pos_rel", obs)
     def target_pose_ee_debug(env: ManagerBasedRlEnv, command_name: str, asset_cfg: SceneEntityCfg):
         obs = target_pose_ee(env, command_name, asset_cfg)
         return check_finite_tensor("target_pose_ee", obs)
+    def filtered_force_torque_debug(env: ManagerBasedRlEnv, command_name: str):
+        obs = filtered_force_torque(env, command_name)
+        return check_finite_tensor("filtered_force_torque", obs)
     def last_action_debug(env: ManagerBasedRlEnv):
         obs = last_action(env)
         return check_finite_tensor("last_action", obs)
     # Actor 观察项
     actor_terms = {
-        # "joint_pos": ObservationTermCfg(
-        #     func=joint_pos_rel_debug,
-        #     noise=Unoise(n_min=-0.01, n_max=0.01),
-        #     params={
-        #         "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
-        #     },
-        # ),
+        "joint_pos": ObservationTermCfg(
+            func=joint_pos_rel_with_history,
+            noise=Unoise(n_min=-0.01, n_max=0.01),
+            params={
+                "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
+            },
+        ),
         # "joint_vel": ObservationTermCfg(
         #     func=joint_vel_rel,
         #     noise=Unoise(n_min=-1.5, n_max=1.5),
@@ -123,26 +129,40 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         #         "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
         #     },
         # ),
-        "ee_to_goal": ObservationTermCfg(
+        "target_pose_world": ObservationTermCfg(
+            func=target_pose_world,
+            params={
+                "command_name": "reach_target",
+            },
+        ),
+        "ee_pose_world": ObservationTermCfg(
+            func=ee_pose_world,
+            params={
+                "command_name": "reach_target",
+            },
+        ),
+        "target_pose_ee": ObservationTermCfg(
             func=target_pose_ee,
             params={
                 "command_name": "reach_target",
-                "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, site_names=(EE_SITE_NAME,)),  # Set per-robot.
             },
             # noise=Unoise(n_min=-0.002, n_max=0.002),
         ),
         "ft_sensor": ObservationTermCfg(
-            func=lambda env: filtered_force_torque(env ,alpha=0.2),
-        ),
-        "actions": ObservationTermCfg(
-            func=last_action,
-        ),
-        "stage": ObservationTermCfg(
-            func=get_stage,
+            func=filtered_force_torque_debug,
             params={
                 "command_name": "reach_target",
             },
         ),
+        "actions": ObservationTermCfg(
+            func=last_action,
+        ),
+        # "stage": ObservationTermCfg(
+        #     func=get_stage,
+        #     params={
+        #         "command_name": "reach_target",
+        #     },
+        # ),
     }
 
     # Critic 观察项
@@ -156,47 +176,52 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
 
     # 动作项
     actions: dict[str, ActionTermCfg] = {
-        "ee_delta_pose": DifferentialIKActionCfg(
+        # "ee_delta_pose": DifferentialIKActionCfg(
+        #     entity_name=UR5E_ENTITY_NAME,
+
+        #     # 控制 UR5e 的全部关节位置执行器
+        #     actuator_names=(".*",),
+
+        #     # 使用末端 site 作为 IK 控制对象
+        #     frame_type="site",
+        #     frame_name=EE_SITE_NAME,
+
+        #     # True 表示 action 是相对当前末端位姿的增量
+        #     # action = [dx, dy, dz, dRx, dRy, dRz]
+        #     use_relative_mode=True,
+
+        #     # 策略输出动作缩放
+        #     # 例如 action 前三维为 [-1,1] 时，对应末端位置增量约 ±1 cm
+        #     delta_pos_scale=0.002,
+
+        #     # 后三维为姿态增量，单位 rad
+        #     # 例如 ±0.05 rad，约 ±2.9 deg
+        #     delta_ori_scale=0.0005,
+
+        #     # DLS IK 阻尼
+        #     damping=0.05,
+
+        #     # 每次 IK 求解允许的最大关节增量，单位 rad/step
+        #     max_dq=0.2,
+
+        #     # 位姿误差权重
+        #     position_weight=1.0,
+        #     orientation_weight=1.0,
+
+        #     # 软关节限位回避
+        #     joint_limit_weight=0.05,
+
+        #     # 姿态正则项，避免冗余自由度乱动
+        #     posture_weight=0.005,
+        #     posture_target={
+        #         ".*": 0.0,
+        #     },
+        # )
+        "joint_delta_pos": RelativeJointPositionActionCfg(
             entity_name=UR5E_ENTITY_NAME,
-
-            # 控制 UR5e 的全部关节位置执行器
             actuator_names=(".*",),
-
-            # 使用末端 site 作为 IK 控制对象
-            frame_type="site",
-            frame_name=EE_SITE_NAME,
-
-            # True 表示 action 是相对当前末端位姿的增量
-            # action = [dx, dy, dz, dRx, dRy, dRz]
-            use_relative_mode=True,
-
-            # 策略输出动作缩放
-            # 例如 action 前三维为 [-1,1] 时，对应末端位置增量约 ±1 cm
-            delta_pos_scale=0.002,
-
-            # 后三维为姿态增量，单位 rad
-            # 例如 ±0.05 rad，约 ±2.9 deg
-            delta_ori_scale=0.0005,
-
-            # DLS IK 阻尼
-            damping=0.05,
-
-            # 每次 IK 求解允许的最大关节增量，单位 rad/step
-            max_dq=0.2,
-
-            # 位姿误差权重
-            position_weight=1.0,
-            orientation_weight=1.0,
-
-            # 软关节限位回避
-            joint_limit_weight=0.05,
-
-            # 姿态正则项，避免冗余自由度乱动
-            posture_weight=0.005,
-            posture_target={
-                ".*": 0.0,
-            },
-        )
+            scale=0.001,
+        ),
     }
 
     # 命令项
@@ -204,11 +229,14 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         "reach_target": ReachTargetCommandCfg(
             resampling_time_range=(8.0, 12.0),
             debug_vis=True,
-            align_pos_tolerance = 0.01,
-            align_quat_tolerance = 0.05,
+            align_pos_tolerance = 0.015,
+            align_quat_tolerance = 0.03,
             insert_pos_tolerance = 0.005,
-            insert_quat_tolerance = 0.02,
+            insert_quat_tolerance = 0.01,
             failure_pos_tolerance = 0.2,
+            force_limit = 240.0,
+            torque_limit = 60.0,
+            failure_ft_cnt_tol = 3,
         )
     }
 
@@ -234,14 +262,15 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
                     "z_start": 0.3,
                     "z_end": 0.7,
                     "roll_range": (-0.2, 0.2),
-                    "pitch_range": (-1.0, 1.0),
+                    "pitch_range": (-0.5, 0.5),
                     "yaw_offset_range": (-0.2, 0.2),
                 },
                 "z_offset": -0.1,
-                "ik_iterations": 80,
+
+                "ik_iterations": 20,
                 "ik_dt": 0.01,
                 "ik_position_cost": 1.0,
-                "ik_orientation_cost": 0.1,
+                "ik_orientation_cost": 0.8,
                 "asset_cfg": SceneEntityCfg(PEG_ENTITY_NAME),
                 "robot_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",)),
             },
@@ -263,8 +292,8 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.1,
-                "pos_std": 0.01,
+                "quat_std": 0.1, # 2倍于 tolerance
+                "pos_std": 0.04, # 2倍于 tolerance
             },
         ),
         "insert_reward": RewardTermCfg( # 插入奖励
@@ -272,8 +301,8 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.05,
-                "pos_std": 0.005,
+                "quat_std": 0.02,
+                "pos_std": 0.01,
             },
         ),
         "pos_reach_macro": RewardTermCfg( # 位置奖励
@@ -284,13 +313,29 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
                 "std": 0.1,
             },
         ),
+        "pos_reach_rate": RewardTermCfg( # 位置趋势奖励
+            func=pos_reach_rate_reward,
+            weight=1.0,
+            params={
+                "command_name": "reach_target",
+                "std": 0.005,
+            },
+        ),
         "quat_reach_macro": RewardTermCfg( # 姿态奖励
             func=quat_reach_reward,
             weight=1.0,
             params={
                 "command_name": "reach_target",
-                "quat_std": 0.5,
+                "quat_std": 0.2,
                 "pos_std": 0.1,
+            },
+        ),
+        "quat_reach_rate": RewardTermCfg( # 姿态趋势奖励
+            func=quat_reach_rate_reward,
+            weight=1.0,
+            params={
+                "command_name": "reach_target",
+                "std": 0.005,
             },
         ),
         "action_rate_l2": RewardTermCfg( # 动作率惩罚
@@ -310,11 +355,18 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         ),
         "ft_penalty": RewardTermCfg( # 力矩传感器惩罚
             func=ft_penalty,
-            weight=-0.5,
+            weight=-0.0,
             params={
-                "alpha": 0.2,
+                "command_name": "reach_target",
                 "force_std": 30.0,
                 "torque_std": 15.0,
+            },
+        ),
+        "stage_reward": RewardTermCfg( # 阶段奖励
+            func=stage_reward,
+            weight=0.5,
+            params={
+                "command_name": "reach_target",
             },
         ),
     }
@@ -339,8 +391,13 @@ def make_peg_env_cfg() -> ManagerBasedRlEnvCfg:
         "ft_exceed_limit": TerminationTermCfg(
             func=ft_exceed_limit,
             params={
-                "force_limit": 60.0,
-                "torque_limit": 30.0,
+                "command_name": "reach_target",
+            },
+        ),
+        "joint_pos_rel_has_nan": TerminationTermCfg(
+            func=joint_pos_rel_has_nan,
+            params={
+                "asset_cfg": SceneEntityCfg(UR5E_ENTITY_NAME, joint_names=(".*",))
             },
         ),
     }
@@ -445,5 +502,16 @@ def peg_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
 
         save_interval=200,
         num_steps_per_env=24,
-        max_iterations=5_000,
+        max_iterations=50_000,
     )
+
+
+# TRAIN:
+# train Mjlab-Peg --agent.logger tensorboard --env.scene.num-envs 512
+
+# RESUME TRAIN: 
+# train Mjlab-Peg --agent.logger tensorboard --env.scene.num-envs 512 --agent.resume True --agent.load-run "2026-05-12_18-30-40" --agent.load-checkpoint model_19999.pt
+# train Mjlab-Peg --agent.logger tensorboard --env.scene.num-envs 512 --agent.resume True --agent.load-run "2026-05-12_18-30-40"
+
+# PLAY:
+# play Mjlab-Peg --checkpoint-file ./logs/rsl_rl/peg_in_hole/2026-05-12_10-20-53/model_49999.pt --viewer viser --num-envs 9

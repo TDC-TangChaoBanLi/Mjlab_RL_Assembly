@@ -4,9 +4,8 @@ import torch
 
 
 from mjlab.envs import ManagerBasedRlEnv
-
-
-from .observations import filtered_force_torque
+from mjlab.envs.mdp.observations import joint_pos_rel
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 
 
 from .commands import ReachTargetCommand
@@ -46,15 +45,14 @@ def failure_peg_in_hole(
             f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
         )
 
-    failure: torch.Tensor = command.metrics["failure"]
+    failure: torch.Tensor = command.metrics["failure_pose"]
     failure = failure.bool()
     return failure
 
 
 def ft_exceed_limit(
     env: ManagerBasedRlEnv,
-    force_limit: float = 500.0,
-    torque_limit: float = 50.0,
+    command_name: str,
 ) -> torch.Tensor:
     """
     失败终止条件：
@@ -68,17 +66,35 @@ def ft_exceed_limit(
     Returns:
         Tensor of shape (num_envs,): True if force or torque exceeds limit
     """
-    ft = filtered_force_torque(env)
+    command = env.command_manager.get_term(command_name)
+    if not isinstance(command, ReachTargetCommand):
+        raise TypeError(
+            f"Command '{command_name}' must be a ReachTargetCommand, got {type(command)}"
+        )
+    
+    failure: torch.Tensor = command.metrics["failure_ft"]
+    failure = failure.bool()
 
-    # Separate force and torque
-    force = ft[..., :3]
-    torque = ft[..., 3:]
+    return failure
 
-    # Compute magnitudes
-    force_mag = torch.norm(force, dim=-1)
-    torque_mag = torch.norm(torque, dim=-1)
 
-    # Check if either exceeds limit
-    exceed = torch.logical_or(force_mag > force_limit, torque_mag > torque_limit)
+def joint_pos_rel_has_nan(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """
+    失败终止条件：
+    joint_pos_rel 返回的关节位置观测中包含 NaN 或 Inf。
 
-    return exceed
+    当关节位置观测异常时终止 episode，避免训练数据污染。
+
+    Args:
+        env: The environment
+        asset_cfg: Scene entity configuration for the robot
+
+    Returns:
+        Tensor of shape (num_envs,): True if joint_pos_rel contains NaN/Inf
+    """
+    obs = joint_pos_rel(env, asset_cfg=asset_cfg)
+    has_nan = ~torch.isfinite(obs).all(dim=-1)
+    return has_nan.bool()
